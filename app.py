@@ -75,6 +75,76 @@ CATEGORIES = {
             'DE': 'https://www.amazon.de/gp/bestsellers/toys',
             'UK': 'https://www.amazon.co.uk/gp/bestsellers/toys',
         }
+    },
+    'clothing': {
+        'name': 'Clothing & Fashion',
+        'urls': {
+            'ES': 'https://www.amazon.es/gp/bestsellers/fashion',
+            'IT': 'https://www.amazon.it/gp/bestsellers/fashion',
+            'FR': 'https://www.amazon.fr/gp/bestsellers/fashion',
+            'DE': 'https://www.amazon.de/gp/bestsellers/fashion',
+            'UK': 'https://www.amazon.co.uk/gp/bestsellers/fashion',
+        }
+    },
+    'automotive': {
+        'name': 'Automotive',
+        'urls': {
+            'ES': 'https://www.amazon.es/gp/bestsellers/automotive',
+            'IT': 'https://www.amazon.it/gp/bestsellers/automotive',
+            'FR': 'https://www.amazon.fr/gp/bestsellers/automotive',
+            'DE': 'https://www.amazon.de/gp/bestsellers/automotive',
+            'UK': 'https://www.amazon.co.uk/gp/bestsellers/automotive',
+        }
+    },
+    'pet': {
+        'name': 'Pet Supplies',
+        'urls': {
+            'ES': 'https://www.amazon.es/gp/bestsellers/pet-supplies',
+            'IT': 'https://www.amazon.it/gp/bestsellers/pet-supplies',
+            'FR': 'https://www.amazon.fr/gp/bestsellers/pet-supplies',
+            'DE': 'https://www.amazon.de/gp/bestsellers/pet-supplies',
+            'UK': 'https://www.amazon.co.uk/gp/bestsellers/pet-supplies',
+        }
+    },
+    'baby': {
+        'name': 'Baby',
+        'urls': {
+            'ES': 'https://www.amazon.es/gp/bestsellers/baby',
+            'IT': 'https://www.amazon.it/gp/bestsellers/baby',
+            'FR': 'https://www.amazon.fr/gp/bestsellers/baby',
+            'DE': 'https://www.amazon.de/gp/bestsellers/baby',
+            'UK': 'https://www.amazon.co.uk/gp/bestsellers/baby',
+        }
+    },
+    'garden': {
+        'name': 'Garden & Outdoors',
+        'urls': {
+            'ES': 'https://www.amazon.es/gp/bestsellers/garden',
+            'IT': 'https://www.amazon.it/gp/bestsellers/garden',
+            'FR': 'https://www.amazon.fr/gp/bestsellers/garden',
+            'DE': 'https://www.amazon.de/gp/bestsellers/garden',
+            'UK': 'https://www.amazon.co.uk/gp/bestsellers/garden',
+        }
+    },
+    'health': {
+        'name': 'Health & Personal Care',
+        'urls': {
+            'ES': 'https://www.amazon.es/gp/bestsellers/hpc',
+            'IT': 'https://www.amazon.it/gp/bestsellers/hpc',
+            'FR': 'https://www.amazon.fr/gp/bestsellers/hpc',
+            'DE': 'https://www.amazon.de/gp/bestsellers/hpc',
+            'UK': 'https://www.amazon.co.uk/gp/bestsellers/hpc',
+        }
+    },
+    'office': {
+        'name': 'Office Products',
+        'urls': {
+            'ES': 'https://www.amazon.es/gp/bestsellers/office-products',
+            'IT': 'https://www.amazon.it/gp/bestsellers/office-products',
+            'FR': 'https://www.amazon.fr/gp/bestsellers/office-products',
+            'DE': 'https://www.amazon.de/gp/bestsellers/office-products',
+            'UK': 'https://www.amazon.co.uk/gp/bestsellers/office-products',
+        }
     }
 }
 
@@ -109,9 +179,10 @@ def extract_price(price_text):
             return None
     return None
 
-def scrape_amazon_bestsellers(country_code, category_key, max_products=15):
+def scrape_amazon_bestsellers(country_code, category_key, max_products=20):
     """
     Scrape Amazon Best Sellers for a specific country and category
+    Now gets 20 products per category for more data!
     """
     try:
         category = CATEGORIES[category_key]
@@ -294,9 +365,9 @@ def fetch_all_data():
         
         all_products = []
         
-        # Scrape each category
+        # Scrape each category (12 products per category for faster scraping)
         for category_key in CATEGORIES.keys():
-            products = scrape_amazon_bestsellers(country_code, category_key, max_products=10)
+            products = scrape_amazon_bestsellers(country_code, category_key, max_products=12)
             all_products.extend(products)
             time.sleep(2)  # Rate limiting
         
@@ -305,7 +376,9 @@ def fetch_all_data():
             'code': country_code,
             'flag': AMAZON_DOMAINS[country_code]['flag'],
             'products': all_products,
-            'total_products': len(all_products)
+            'trending_searches': all_products,  # Frontend compatibility
+            'total_products': len(all_products),
+            'total_trends': len(all_products)  # Frontend compatibility
         }
         
         time.sleep(3)  # Rate limiting between countries
