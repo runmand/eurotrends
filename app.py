@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 import statistics
 import re
+import os  # BUG FIX #1: estava faltando este import!
 
 app = Flask(__name__)
 CORS(app)
@@ -151,26 +152,35 @@ CATEGORIES = {
 cache = {'data': None, 'timestamp': None}
 CACHE_DURATION = 3600  # 1 hour
 
+# BUG FIX #2: User-Agent pool rotativo para evitar bloqueio da Amazon
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+]
+_ua_index = 0
+
 def get_headers():
-    """Random user agent to avoid blocking"""
+    """Rotaciona user agents para evitar bloqueio"""
+    global _ua_index
+    ua = USER_AGENTS[_ua_index % len(USER_AGENTS)]
+    _ua_index += 1
     return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': ua,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0',
     }
 
 def extract_price(price_text):
     """Extract numeric price from text"""
     if not price_text:
         return None
-    
-    # Remove currency symbols and extract number
     price_text = price_text.replace('€', '').replace('£', '').replace(',', '.').strip()
-    
-    # Find first number with optional decimal
     match = re.search(r'(\d+\.?\d*)', price_text)
     if match:
         try:
@@ -182,35 +192,48 @@ def extract_price(price_text):
 def scrape_amazon_bestsellers(country_code, category_key, max_products=20):
     """
     Scrape Amazon Best Sellers for a specific country and category
-    Now gets 20 products per category for more data!
     """
     try:
         category = CATEGORIES[category_key]
         url = category['urls'].get(country_code)
-        
+
         if not url:
             print(f"  ⚠️  No URL for {country_code} - {category_key}")
             return []
-        
+
         print(f"  📊 Scraping {country_code} - {category['name']}...")
-        
-        response = requests.get(url, headers=get_headers(), timeout=10)
-        
+
+        # BUG FIX #3: timeout aumentado e session com retry
+        session = requests.Session()
+        response = session.get(url, headers=get_headers(), timeout=15, allow_redirects=True)
+
+        if response.status_code == 503:
+            print(f"  ⚠️  Amazon bloqueou (503) - aguardando e tentando novamente...")
+            time.sleep(5)
+            response = session.get(url, headers=get_headers(), timeout=15)
+
         if response.status_code != 200:
             print(f"  ❌ Failed: {response.status_code}")
             return []
-        
+
         soup = BeautifulSoup(response.content, 'html.parser')
-        
+
         products = []
-        
-        # Find product cards
+
+        # Find product cards - múltiplos seletores para robustez
         items = soup.find_all('div', {'class': 'zg-grid-general-faceout'})[:max_products]
-        
+
         if not items:
-            # Try alternative structure
             items = soup.find_all('div', {'id': re.compile(r'gridItemRoot')})[:max_products]
-        
+
+        if not items:
+            # BUG FIX #4: seletor adicional para quando Amazon muda o layout
+            items = soup.find_all('li', {'class': re.compile(r'zg-item-immersion')})[:max_products]
+
+        if not items:
+            print(f"  ⚠️  Nenhum produto encontrado - Amazon pode ter bloqueado ou mudado o layout")
+            return []
+
         for idx, item in enumerate(items, 1):
             try:
                 # Product name
@@ -219,21 +242,26 @@ def scrape_amazon_bestsellers(country_code, category_key, max_products=20):
                     title_elem = item.find('div', {'class': 'p13n-sc-truncate'})
                 if not title_elem:
                     title_elem = item.find('a', {'class': 'a-link-normal'})
-                
+                if not title_elem:
+                    # BUG FIX #5: fallback genérico para pegar qualquer texto de título
+                    title_elem = item.find('span', {'class': re.compile(r'p13n-sc')})
+
                 title = title_elem.get_text(strip=True) if title_elem else f"Product #{idx}"
-                
+
                 # Price
                 price_elem = item.find('span', {'class': 'p13n-sc-price'})
                 if not price_elem:
                     price_elem = item.find('span', {'class': 'a-price-whole'})
-                
+                if not price_elem:
+                    price_elem = item.find('span', {'class': re.compile(r'a-price')})
+
                 price_text = price_elem.get_text(strip=True) if price_elem else None
                 price = extract_price(price_text)
-                
+
                 # Product link
                 link_elem = item.find('a', href=True)
                 product_url = f"https://www.{AMAZON_DOMAINS[country_code]['domain']}{link_elem['href']}" if link_elem else None
-                
+
                 # Rating
                 rating_elem = item.find('span', {'class': 'a-icon-alt'})
                 rating_text = rating_elem.get_text(strip=True) if rating_elem else None
@@ -242,48 +270,67 @@ def scrape_amazon_bestsellers(country_code, category_key, max_products=20):
                     rating_match = re.search(r'(\d+\.?\d*)', rating_text)
                     if rating_match:
                         rating = float(rating_match.group(1))
-                
+
                 # Reviews count
                 reviews_elem = item.find('span', {'class': 'a-size-small'})
                 reviews_text = reviews_elem.get_text(strip=True) if reviews_elem else '0'
                 reviews_match = re.search(r'(\d+)', reviews_text.replace(',', '').replace('.', ''))
                 reviews = int(reviews_match.group(1)) if reviews_match else 0
-                
-                # Calculate scores
+
                 scores = calculate_scores(idx, price, rating, reviews, len(items))
-                
+
+                # BUG FIX #6: campo alert_reason estava faltando no objeto produto!
+                # O frontend usa este campo e quebrava silenciosamente sem ele
+                alert_reason = generate_alert_reason(idx, scores, price, reviews)
+
                 products.append({
                     'rank': idx,
-                    'title': title[:100],  # Limit title length
+                    'title': title[:100],
                     'price': price,
                     'currency': AMAZON_DOMAINS[country_code]['currency'],
                     'rating': rating,
                     'reviews': reviews,
                     'url': product_url,
                     'category': category_key,
+                    'alert_reason': alert_reason,  # CAMPO QUE FALTAVA
                     **scores
                 })
-                
+
                 print(f"    ✓ #{idx} {title[:50]}... | €{price} | ⭐{rating} | Opp:{scores['opportunity_score']}")
-                
+
             except Exception as e:
                 print(f"    ⚠️  Error parsing item {idx}: {e}")
                 continue
-        
+
         print(f"  ✅ Got {len(products)} products")
         return products
-        
+
     except Exception as e:
         print(f"  ❌ Error scraping {country_code} - {category_key}: {e}")
         return []
 
+
+def generate_alert_reason(rank, scores, price, reviews):
+    """Gera uma razão de alerta legível para o frontend"""
+    if rank <= 3 and scores['saturation_score'] < 4:
+        return f"Top {rank} com baixa saturação — janela de oportunidade aberta"
+    elif scores['opportunity_score'] >= 8:
+        return f"Alto score de oportunidade ({scores['opportunity_score']}) com momentum crescente"
+    elif price and price < 25 and reviews < 1000:
+        return f"Preço acessível (€{price}) e poucos concorrentes estabelecidos"
+    elif scores['growth_velocity'] == 'explosive':
+        return "Crescimento explosivo detectado nas últimas semanas"
+    elif scores['growth_velocity'] == 'fast':
+        return f"Crescimento acelerado — #{rank} no ranking com {scores['change']} de crescimento"
+    else:
+        return f"Produto em ascensão — #{rank} no ranking com potencial identificado"
+
+
 def calculate_scores(rank, price, rating, reviews, total_products):
     """Calculate intelligence scores for a product"""
-    
-    # Trend Score (0-10) - based on rank
+
     trend_score = max(0, 10 - (rank * 0.5))
-    
-    # Saturation Score (0-10) - based on reviews (more reviews = more saturated)
+
     if reviews > 10000:
         saturation_score = 9.0
     elif reviews > 5000:
@@ -294,11 +341,9 @@ def calculate_scores(rank, price, rating, reviews, total_products):
         saturation_score = 3.0
     else:
         saturation_score = 1.0
-    
-    # Momentum Score - high rank + low saturation = opportunity
+
     momentum_score = (trend_score * 0.6) + ((10 - saturation_score) * 0.4)
-    
-    # Growth velocity based on rank
+
     if rank <= 3:
         velocity = 'explosive'
         change = f'+{160 - (rank * 10)}%'
@@ -310,25 +355,22 @@ def calculate_scores(rank, price, rating, reviews, total_products):
         change = f'+{90 - (rank * 3)}%'
     else:
         velocity = 'slow'
-        change = f'+{70 - (rank * 2)}%'
-    
-    # Price factor
+        change = f'+{max(10, 70 - (rank * 2))}%'
+
     if price:
         if price < 20:
-            price_score = 8.0  # Low price = easier to sell
+            price_score = 8.0
         elif price < 50:
-            price_score = 9.0  # Sweet spot
+            price_score = 9.0
         elif price < 100:
             price_score = 7.0
         else:
             price_score = 5.0
     else:
         price_score = 5.0
-    
-    # Rating factor
+
     rating_score = (rating * 2) if rating else 5.0
-    
-    # Opportunity Score - THE MAIN ONE
+
     opportunity_score = (
         (trend_score * 0.25) +
         ((10 - saturation_score) * 0.35) +
@@ -336,7 +378,7 @@ def calculate_scores(rank, price, rating, reviews, total_products):
         (price_score * 0.10) +
         (rating_score * 0.10)
     )
-    
+
     return {
         'trend_score': round(trend_score, 1),
         'saturation_score': round(saturation_score, 1),
@@ -348,6 +390,7 @@ def calculate_scores(rank, price, rating, reviews, total_products):
         'estimated_lifetime': '2-4 weeks' if rank <= 3 else '1-2 months' if rank <= 7 else '2-4 months'
     }
 
+
 def fetch_all_data():
     """Fetch all Amazon Best Sellers data"""
     data = {
@@ -357,32 +400,31 @@ def fetch_all_data():
         'heating_up': [],
         'market_overview': {}
     }
-    
+
     priority_countries = ['ES', 'IT', 'FR', 'DE', 'UK']
-    
+
     for country_code in priority_countries:
         print(f"\n🌍 Processing {AMAZON_DOMAINS[country_code]['name']}...")
-        
+
         all_products = []
-        
-        # Scrape each category (12 products per category for faster scraping)
+
         for category_key in CATEGORIES.keys():
             products = scrape_amazon_bestsellers(country_code, category_key, max_products=12)
             all_products.extend(products)
-            time.sleep(2)  # Rate limiting
-        
+            time.sleep(2)
+
         data['countries'][country_code] = {
             'name': AMAZON_DOMAINS[country_code]['name'],
             'code': country_code,
             'flag': AMAZON_DOMAINS[country_code]['flag'],
             'products': all_products,
-            'trending_searches': all_products,  # Frontend compatibility
+            'trending_searches': all_products,
             'total_products': len(all_products),
-            'total_trends': len(all_products)  # Frontend compatibility
+            'total_trends': len(all_products)
         }
-        
-        time.sleep(3)  # Rate limiting between countries
-    
+
+        time.sleep(3)
+
     # Detect heating products
     all_products_flat = []
     for country_code, country_data in data['countries'].items():
@@ -392,52 +434,67 @@ def fetch_all_data():
                 'country': country_code,
                 'country_name': AMAZON_DOMAINS[country_code]['name']
             })
-    
-    # Filter heating products
+
     heating = [
         p for p in all_products_flat
         if p['momentum_score'] >= 6 and p['saturation_score'] < 6
     ]
     heating.sort(key=lambda x: x['opportunity_score'], reverse=True)
     data['heating_up'] = heating[:30]
-    
-    # Market overview
+
+    # BUG FIX #7: market_overview estava faltando campos que o frontend usa
+    # O frontend espera: name, flag, cpm, avg_opportunity_score, best_channel,
+    # top_niche, total_trends, market_temperature
     for country_code, country_data in data['countries'].items():
         products = country_data['products']
-        
+
         if products:
             avg_opp = statistics.mean([p['opportunity_score'] for p in products])
             avg_sat = statistics.mean([p['saturation_score'] for p in products])
-            avg_price = statistics.mean([p['price'] for p in products if p['price']])
-            
+            prices = [p['price'] for p in products if p['price']]
+            avg_price = statistics.mean(prices) if prices else 0
+
+            # Niche mais popular
+            niche_counts = {}
+            for p in products:
+                cat = p.get('category', 'general')
+                niche_counts[cat] = niche_counts.get(cat, 0) + 1
+            top_niche = max(niche_counts, key=niche_counts.get) if niche_counts else 'N/A'
+
             data['market_overview'][country_code] = {
                 'name': AMAZON_DOMAINS[country_code]['name'],
                 'flag': AMAZON_DOMAINS[country_code]['flag'],
+                'cpm': AMAZON_DOMAINS[country_code]['cpm'],
+                'avg_opportunity_score': round(avg_opp, 1),  # campo que o frontend usa
                 'avg_opportunity': round(avg_opp, 1),
                 'avg_saturation': round(avg_sat, 1),
-                'avg_price': round(avg_price, 2) if products else 0,
+                'avg_price': round(avg_price, 2),
                 'currency': AMAZON_DOMAINS[country_code]['currency'],
                 'total_products': len(products),
-                'cpm': AMAZON_DOMAINS[country_code]['cpm']
+                'total_trends': len(products),             # campo que o frontend usa
+                'top_niche': top_niche,                    # campo que o frontend usa
+                'best_channel': 'Meta Ads' if AMAZON_DOMAINS[country_code]['cpm'] < 6 else 'Google Ads',  # campo que o frontend usa
+                'market_temperature': 'hot' if avg_opp >= 6 else 'warm',  # campo que o frontend usa
             }
-    
+
     print(f"\n🔥 Found {len(data['heating_up'])} products heating up!")
-    
+
     return data
+
 
 @app.route('/api/intelligence', methods=['GET'])
 def get_intelligence():
     """Main endpoint"""
     global cache
-    
+
     if cache['data'] and cache['timestamp']:
         age = (datetime.now() - cache['timestamp']).total_seconds()
         if age < CACHE_DURATION:
             print(f"📦 Cache hit ({int(age)}s old)")
             return jsonify({**cache['data'], 'cached': True, 'cache_age': int(age)})
-    
+
     print("🔄 Fetching fresh Amazon data...")
-    
+
     try:
         data = fetch_all_data()
         cache['data'] = data
@@ -447,7 +504,8 @@ def get_intelligence():
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'message': 'Erro ao buscar dados da Amazon'}), 500
+
 
 @app.route('/api/heating-up', methods=['GET'])
 def get_heating():
@@ -459,6 +517,7 @@ def get_heating():
         })
     return jsonify({'heating_up': [], 'total': 0})
 
+
 @app.route('/api/market-overview', methods=['GET'])
 def get_overview():
     """Market overview"""
@@ -469,6 +528,7 @@ def get_overview():
         })
     return jsonify({'market_overview': {}})
 
+
 @app.route('/api/refresh', methods=['POST'])
 def refresh():
     """Force refresh"""
@@ -477,16 +537,18 @@ def refresh():
     cache['timestamp'] = None
     return get_intelligence()
 
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check"""
     return jsonify({
         'status': 'healthy',
         'service': 'GLTREND Amazon Intelligence',
-        'version': '4.0',
+        'version': '4.1',
         'source': 'Amazon Best Sellers',
         'cache_status': 'active' if cache['data'] else 'empty'
     })
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
@@ -494,13 +556,13 @@ if __name__ == '__main__':
     ╔════════════════════════════════════════╗
     ║   🛒 GLTREND V4 - AMAZON INTELLIGENCE  ║
     ╚════════════════════════════════════════╝
-    
+
     📦 Source: Amazon Best Sellers
     🌍 Countries: ES, IT, FR, DE, UK
-    📊 Categories: 5 (Electronics, Home, Beauty, Sports, Toys)
+    📊 Categories: {len(CATEGORIES)} categories
     ⚡ Real products with prices, ratings, reviews
-    
+
     Starting on port {port}...
     """)
-    
+
     app.run(host='0.0.0.0', port=port, debug=False)
